@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
 using PokerSocial.Data;
 using PokerSocial.Systems;
 
@@ -36,6 +37,7 @@ namespace PokerSocial.Core
         private Text repText;
         private Text logText;
         private Transform actionPanel;
+        private int buttonPlacementIndex = 0;
 
         private readonly List<PlayerData> players = new();
         private readonly Dictionary<string, List<CardView>> seatCards = new();
@@ -57,7 +59,7 @@ namespace PokerSocial.Core
 
         private void Start()
         {
-            llmBrain = GetComponent<LLMOpponentBrain>(); // add this component to enable LLM opponents
+            llmBrain = GetComponent<LLMOpponentBrain>(); // add this component to enable LLM opponents (inactive)
 
             BuildUI();
             SetupPlayers();
@@ -83,53 +85,50 @@ namespace PokerSocial.Core
                 repText.text = $"Table reputation: {rep:F2}  |  Stakes cap: {t.stakesCap}";
         }
 
-        // ---------------- UI construction ----------------
+        // ---------------- UI ----------------
 
         private void BuildUI()
         {
+            if (FindObjectOfType<EventSystem>() == null)
+            {
+                var esGO = new GameObject("EventSystem");
+                esGO.AddComponent<EventSystem>();
+                esGO.AddComponent<StandaloneInputModule>();
+            }
+
             var canvasGO = new GameObject("PokerCanvas");
             var canvas = canvasGO.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+
             var scaler = canvasGO.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1600, 900);
             canvasGO.AddComponent<GraphicRaycaster>();
-            RectTransform canvasRect = canvasGO.GetComponent<RectTransform>();
 
-            tableFelt = CreatePanel(canvasRect, new Vector2(80, -30), new Vector2(950, 560), new Color(0.05f, 0.35f, 0.15f));
-            deckAnchor = CreateAnchor(tableFelt, new Vector2(0, 30));
+            // Table Felt & Deck Anchor
+            tableFelt = CreatePanel(canvasGO.transform, Vector2.zero, new Vector2(1100, 550), new Color(0.1f, 0.4f, 0.2f, 1f));
+            deckAnchor = CreateAnchor(tableFelt, new Vector2(0, 40));
 
-            potText = CreateText(canvasRect, new Vector2(80, 300), new Vector2(400, 36), 26, "Pot: 0");
-            repText = CreateText(canvasRect, new Vector2(80, 262), new Vector2(500, 28), 16, "Table reputation: 1.00  |  Stakes cap: 1000");
+            // Pot & Reputation Labels
+            potText = CreateText(tableFelt, new Vector2(0, -20), new Vector2(300, 40), 28, "Pot: 0");
+            repText = CreateText(canvasGO.transform, new Vector2(0, -420), new Vector2(800, 30), 18, "Table reputation: 1.00 | Stakes cap: 1000");
 
-            logText = CreateText(canvasRect, new Vector2(720, -20), new Vector2(420, 760), 15, "");
-            logText.alignment = TextAnchor.UpperLeft;
+            // Action Panel & UI Buttons
+            actionPanel = CreatePanel(canvasGO.transform, new Vector2(600, 0), new Vector2(300, 360), new Color(0.15f, 0.15f, 0.18f, 0.95f));
 
-            var apGO = new GameObject("ActionPanel");
-            actionPanel = apGO.transform;
-            actionPanel.SetParent(canvasRect, false);
-            var apRect = apGO.AddComponent<RectTransform>();
-            apRect.anchorMin = new Vector2(0f, 0f);
-            apRect.anchorMax = new Vector2(0f, 0f);
-            apRect.pivot = new Vector2(0f, 0f);
-            apRect.anchoredPosition = new Vector2(20, 20);
-            apRect.sizeDelta = new Vector2(280, 320);
-            var layout = apGO.AddComponent<VerticalLayoutGroup>();
-            layout.spacing = 6;
-            layout.childControlHeight = false;
-            layout.childControlWidth = false;
-            layout.childAlignment = TextAnchor.LowerLeft;
-
+            buttonPlacementIndex = 0;
             foldBtn = CreateButton(actionPanel, "Fold", OnFoldClicked);
-            checkBtn = CreateButton(actionPanel, "Check / Continue", OnCheckClicked);
-            bluffBtn = CreateButton(actionPanel, "Call Bluff on seat 2", OnBluffClicked);
-            strongBtn = CreateButton(actionPanel, "Read Strong on seat 2", OnStrongClicked);
-            allianceBtn = CreateButton(actionPanel, "Whisper alliance w/ seat 3", OnAllianceClicked);
-            tellBtn = CreateButton(actionPanel, "Broadcast fake tell", OnTellClicked);
-            newHandBtn = CreateButton(actionPanel, "New Hand", OnNewHandClicked);
-            newHandBtn.gameObject.SetActive(false);
+            checkBtn = CreateButton(actionPanel, "Check", OnCheckClicked);
+            bluffBtn = CreateButton(actionPanel, "Call Bluff (Seat 2)", OnBluffClicked);
+            strongBtn = CreateButton(actionPanel, "Call Strong (Seat 2)", OnStrongClicked);
+            allianceBtn = CreateButton(actionPanel, "Alliance (Seat 3)", OnAllianceClicked);
+            tellBtn = CreateButton(actionPanel, "Broadcast Fake Tell", OnTellClicked);
+            newHandBtn = CreateButton(actionPanel, "Next Hand", OnNewHandClicked);
 
-            SetActionButtonsInteractable(false);
+            // Activity Log Panel
+            var logPanel = CreatePanel(canvasGO.transform, new Vector2(-580, 0), new Vector2(340, 500), new Color(0.05f, 0.05f, 0.05f, 0.85f));
+            logText = CreateText(logPanel, Vector2.zero, new Vector2(320, 480), 14, "");
+            logText.alignment = TextAnchor.UpperLeft;
         }
 
         private RectTransform CreatePanel(Transform parent, Vector2 pos, Vector2 size, Color color)
@@ -179,10 +178,17 @@ namespace PokerSocial.Core
             var go = new GameObject("Button_" + label);
             go.transform.SetParent(parent, false);
             var img = go.AddComponent<Image>();
-            img.color = new Color(0.2f, 0.2f, 0.2f);
+            img.color = new Color(0.55f, 0.55f, 0.6f, 1f);
             var rect = go.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.5f, 1f);
+            rect.anchorMax = new Vector2(0.5f, 1f);
+            rect.pivot = new Vector2(0.5f, 1f);
             rect.sizeDelta = new Vector2(260, 34);
+            rect.anchoredPosition = new Vector2(0, -10 - buttonPlacementIndex * 40);
+            buttonPlacementIndex++;
+
             var btn = go.AddComponent<Button>();
+            btn.transition = Selectable.Transition.None; // stop Unity from auto-overriding our manual color
             btn.onClick.AddListener(onClick);
 
             var textGO = new GameObject("Label");
