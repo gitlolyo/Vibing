@@ -691,10 +691,10 @@ PlayerSettings:
   activeInputHandler: 2
   windowsGamepadBackendHint: 0
   enableDirectStorage: 0
-  cloudProjectId: 1f154c21-28a7-4c9b-940b-47fa89b90b3a
+  cloudProjectId: 9c49c468-5ee1-4e9f-af5d-3ed750cc6580
   framebufferDepthMemorylessMode: 0
   qualitySettingsNames: []
-  projectName: Poker
+  projectName: Poker (1)
   organizationId: siwonlee52
   cloudEnabled: 0
   legacyClampBlendShapeWeights: 0

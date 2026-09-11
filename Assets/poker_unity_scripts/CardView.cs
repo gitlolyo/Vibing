@@ -7,14 +7,7 @@ using PokerSocial.Data;
 
 namespace PokerSocial.Core
 {
-    /// <summary>
-    /// A single card rendered with plain uGUI (no art assets needed): a colored
-    /// panel + text label for rank/suit. Supports a flip animation (face down
-    /// <-> face up) and a move animation (deck -> hand), and is clickable.
-    /// Built entirely at runtime via CardView.Create(), same pattern as the
-    /// existing PokerDemo canvas setup.
-    /// </summary>
-    public class CardView : MonoBehaviour, IPointerClickHandler
+    public class CardView : MonoBehaviour, IPointerClickHandler, IPointerEnterHandler, IPointerExitHandler
     {
         public Card Card { get; private set; }
         public bool FaceUp { get; private set; }
@@ -24,6 +17,7 @@ namespace PokerSocial.Core
 
         private Image bg;
         private Text label;
+        private Vector3 originalScale = Vector3.one;
 
         private static readonly Color FaceColorRed = new Color(1f, 0.93f, 0.93f);
         private static readonly Color FaceColorBlack = new Color(0.93f, 0.93f, 1f);
@@ -79,7 +73,17 @@ namespace PokerSocial.Core
             label.text = $"{RankSymbol(Card.rank)}{SuitSymbol(Card.suit)}";
         }
 
-        /// <summary>Squash-and-reveal flip. Call again to flip back.</summary>
+        public void OnPointerEnter(PointerEventData eventData)
+        {
+            transform.SetAsLastSibling();
+            transform.localScale = originalScale * 1.25f;
+        }
+
+        public void OnPointerExit(PointerEventData eventData)
+        {
+            transform.localScale = originalScale;
+        }
+
         public IEnumerator FlipRoutine(float duration = 0.25f)
         {
             float half = duration / 2f;
@@ -103,6 +107,7 @@ namespace PokerSocial.Core
                 yield return null;
             }
             Rect.localScale = Vector3.one;
+            originalScale = Vector3.one;
         }
 
         public IEnumerator MoveRoutine(Vector2 targetAnchoredPos, float duration)

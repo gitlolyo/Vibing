@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -12,17 +13,49 @@ namespace PokerSocial.Data
     public struct HandEvaluation
     {
         public HandRank rank;
-        public List<int> tiebreakers; // descending, for comparing same-rank hands
+        public List<int> tiebreakers;
         public string description;
     }
 
     public static class HandEvaluator
     {
-        public static HandEvaluation Evaluate(List<Card> hand)
+        public static HandEvaluation Evaluate(List<Card> cards)
         {
-            if (hand.Count != 5)
-                throw new System.ArgumentException("Evaluator expects exactly 5 cards");
+            if (cards == null || cards.Count == 0)
+                return new HandEvaluation { rank = HandRank.HighCard, description = "No cards" };
 
+            // If less than 5 cards total, evaluate based on what's available
+            if (cards.Count < 5)
+            {
+                var sortedRanks = cards.Select(c => (int)c.rank).OrderByDescending(r => r).ToList();
+                return new HandEvaluation
+                {
+                    rank = HandRank.HighCard,
+                    tiebreakers = sortedRanks,
+                    description = $"High Card, {(Rank)sortedRanks[0]}"
+                };
+            }
+
+            // Generate all 5-card combinations from available cards
+            var combos = GetCombinations(cards, 5);
+            HandEvaluation bestEval = default;
+            bool first = true;
+
+            foreach (var combo in combos)
+            {
+                var eval = EvaluateFiveCards(combo);
+                if (first || Compare(eval, bestEval) > 0)
+                {
+                    bestEval = eval;
+                    first = false;
+                }
+            }
+
+            return bestEval;
+        }
+
+        private static HandEvaluation EvaluateFiveCards(List<Card> hand)
+        {
             var ranks = hand.Select(c => (int)c.rank).OrderByDescending(r => r).ToList();
             var suits = hand.Select(c => c.suit).ToList();
             bool isFlush = suits.Distinct().Count() == 1;
@@ -69,7 +102,6 @@ namespace PokerSocial.Data
             if (distinct.Count == 5 && distinct[0] - distinct[4] == 4)
                 return true;
 
-            // Ace-low straight: A,5,4,3,2
             if (distinct.SequenceEqual(new List<int> { 14, 5, 4, 3, 2 }))
             {
                 high = 5;
@@ -78,16 +110,23 @@ namespace PokerSocial.Data
             return false;
         }
 
-        /// <summary>Returns 1 if a beats b, -1 if b beats a, 0 if tied.</summary>
         public static int Compare(HandEvaluation a, HandEvaluation b)
         {
             if (a.rank != b.rank) return a.rank > b.rank ? 1 : -1;
-            for (int i = 0; i < System.Math.Min(a.tiebreakers.Count, b.tiebreakers.Count); i++)
+            for (int i = 0; i < Math.Min(a.tiebreakers.Count, b.tiebreakers.Count); i++)
             {
                 if (a.tiebreakers[i] != b.tiebreakers[i])
                     return a.tiebreakers[i] > b.tiebreakers[i] ? 1 : -1;
             }
             return 0;
+        }
+
+        private static IEnumerable<List<T>> GetCombinations<T>(List<T> list, int length)
+        {
+            if (length == 1) return list.Select(t => new List<T> { t });
+            return GetCombinations(list, length - 1)
+                .SelectMany(t => list.Where(e => !t.Contains(e)), (t1, t2) => new List<T>(t1) { t2 })
+                .Where(c => c.Count == length);
         }
     }
 }

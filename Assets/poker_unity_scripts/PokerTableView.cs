@@ -10,58 +10,227 @@ using PokerSocial.Systems;
 
 namespace PokerSocial.Core
 {
-    /// <summary>
-    /// Playable, visual poker table. Builds its own UI at runtime (no prefabs
-    /// needed): shuffles a real deck, deals animated cards to seats around a
-    /// table, lets the human player (seat 0) fold or check, use the social
-    /// systems (reads/alliances/tells), then runs a showdown with the real
-    /// HandEvaluator and pays out the pot.
-    ///
-    /// AI: if an LLMOpponentBrain component is attached to this same
-    /// GameObject, opponents route their fold/call decision through it
-    /// (async, one request per still-in opponent) after your decision and
-    /// before showdown. If none is attached, opponents just auto-call, same
-    /// as before - nothing breaks either way.
-    ///
-    /// Drop this on an empty GameObject and press Play.
-    /// </summary>
     public class PokerTableView : MonoBehaviour
     {
         [SerializeField] private int playerCount = 4;
         [SerializeField] private int startingChips = 1000;
         [SerializeField] private int ante = 10;
 
+        private GameObject startMenuPanel;
+        private InputField nameInputField;
+
         private RectTransform tableFelt;
         private RectTransform deckAnchor;
+        private RectTransform communityAnchor;
         private Text potText;
         private Text repText;
         private Text logText;
+        private ScrollRect scrollRect;
         private Transform actionPanel;
         private int buttonPlacementIndex = 0;
 
         private readonly List<PlayerData> players = new();
         private readonly Dictionary<string, List<CardView>> seatCards = new();
+        private readonly List<CardView> communityCardViews = new();
+        private readonly List<Card> communityCards = new();
         private readonly Dictionary<string, RectTransform> seatAnchors = new();
         private readonly Dictionary<string, bool> stillIn = new();
+        private readonly Dictionary<string, int> currentBets = new();
 
         private TableState table;
         private readonly ReadSystem readSystem = new();
         private readonly AllianceSystem allianceSystem = new();
         private readonly TellSystem tellSystem = new();
         private readonly ReputationManager reputationManager = new();
-        private LLMOpponentBrain llmBrain; // optional - auto-found on this GameObject, null is fine
+        private LLMOpponentBrain llmBrain;
 
         private int pot;
+        private int highestBet;
         private bool waitingForHumanDecision;
         private bool humanFolded;
+        private int humanRaiseAmount = 50;
+        private string playerName = "Player";
 
-        private Button foldBtn, checkBtn, bluffBtn, strongBtn, allianceBtn, tellBtn, newHandBtn;
+        private Button foldBtn, callCheckBtn, raiseBtn, bluffBtn, strongBtn, allianceBtn, tellBtn, newHandBtn;
+        private Text callCheckText;
 
-        private void Start()
+        private CloudBallerTracker cloudManager;
+
+        private async void Start()
         {
-            llmBrain = GetComponent<LLMOpponentBrain>(); // add this component to enable LLM opponents (inactive)
+            llmBrain = GetComponent<LLMOpponentBrain>();
+
+            // 1. Check if manager exists on this GameObject or ANY object in the scene
+            var cloudTracker = FindObjectOfType<CloudBallerTracker>();
+
+            // 2. Only add it dynamically if it doesn't exist anywhere in the scene
+            if (cloudTracker == null)
+            {
+                cloudTracker = gameObject.AddComponent<CloudBallerTracker>();
+            }
+
+            // 3. Load chips after ensuring a single instance is used
+            startingChips = await cloudTracker.LoadChipsAsync(1000);
 
             BuildUI();
+        }
+
+        // Call whenever a hand finishes
+        private async void OnHandComplete(int newChipTotal)
+        {
+            await cloudManager.SaveChipsAsync(newChipTotal);
+        }
+
+        private void BuildUI()
+        {
+            if (FindObjectOfType<EventSystem>() == null)
+            {
+                var esGO = new GameObject("EventSystem");
+                esGO.AddComponent<EventSystem>();
+                esGO.AddComponent<StandaloneInputModule>();
+            }
+
+            var canvasGO = new GameObject("PokerCanvas");
+            var canvas = canvasGO.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            var scaler = canvasGO.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1600, 900);
+            canvasGO.AddComponent<GraphicRaycaster>();
+
+            // --- TABLE UI (Hidden initially) ---
+            tableFelt = CreatePanel(canvasGO.transform, Vector2.zero, new Vector2(1100, 550), new Color(0.1f, 0.4f, 0.2f, 1f));
+            deckAnchor = CreateAnchor(tableFelt, new Vector2(-250, 0));
+            communityAnchor = CreateAnchor(tableFelt, new Vector2(0, 0));
+
+            potText = CreateText(tableFelt, new Vector2(0, -120), new Vector2(300, 40), 28, "Pot: 0");
+            repText = CreateText(canvasGO.transform, new Vector2(0, -420), new Vector2(800, 30), 18, "Table reputation: 1.00  |  Stakes cap: 1000");
+
+            actionPanel = CreatePanel(canvasGO.transform, new Vector2(600, 0), new Vector2(300, 420), new Color(0.15f, 0.15f, 0.18f, 0.95f));
+
+            buttonPlacementIndex = 0;
+            foldBtn = CreateButton(actionPanel, "Fold", OnFoldClicked);
+            callCheckBtn = CreateButton(actionPanel, "Check", OnCallCheckClicked);
+            callCheckText = callCheckBtn.GetComponentInChildren<Text>();
+            raiseBtn = CreateButton(actionPanel, "Raise (+50)", OnRaiseClicked);
+            bluffBtn = CreateButton(actionPanel, "Call Bluff (Seat 2)", OnBluffClicked);
+            strongBtn = CreateButton(actionPanel, "Call Strong (Seat 2)", OnStrongClicked);
+            allianceBtn = CreateButton(actionPanel, "Alliance (Seat 3)", OnAllianceClicked);
+            tellBtn = CreateButton(actionPanel, "Broadcast Fake Tell", OnTellClicked);
+            newHandBtn = CreateButton(actionPanel, "Next Hand", OnNewHandClicked);
+
+            // Log Panel Setup
+            var logPanel = CreatePanel(canvasGO.transform, new Vector2(-600, 0), new Vector2(320, 480), new Color(0.15f, 0.15f, 0.18f, 0.95f));
+            var scrollGO = new GameObject("ScrollRect");
+            scrollGO.transform.SetParent(logPanel, false);
+            var srRect = scrollGO.AddComponent<RectTransform>();
+            srRect.anchorMin = Vector2.zero;
+            srRect.anchorMax = Vector2.one;
+            srRect.sizeDelta = new Vector2(-20, -20);
+
+            scrollRect = scrollGO.AddComponent<ScrollRect>();
+            scrollRect.scrollSensitivity = 45f;
+            scrollRect.movementType = ScrollRect.MovementType.Clamped;
+            scrollGO.AddComponent<RectMask2D>();
+
+            var contentGO = new GameObject("Content");
+            contentGO.transform.SetParent(scrollGO.transform, false);
+            var cRect = contentGO.AddComponent<RectTransform>();
+            cRect.anchorMin = new Vector2(0, 1);
+            cRect.anchorMax = new Vector2(1, 1);
+            cRect.pivot = new Vector2(0, 1);
+            cRect.sizeDelta = new Vector2(0, 0);
+
+            var csf = contentGO.AddComponent<ContentSizeFitter>();
+            csf.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+            csf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            var vlg = contentGO.AddComponent<VerticalLayoutGroup>();
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+
+            logText = CreateText(contentGO.transform, Vector2.zero, Vector2.zero, 14, "");
+            logText.alignment = TextAnchor.UpperLeft;
+
+            var textLayout = logText.gameObject.AddComponent<LayoutElement>();
+            textLayout.flexibleWidth = 1;
+
+            scrollRect.content = cRect;
+            scrollRect.vertical = true;
+            scrollRect.horizontal = false;
+
+            // Hide gameplay panels initially
+            tableFelt.gameObject.SetActive(false);
+            actionPanel.gameObject.SetActive(false);
+            logPanel.gameObject.SetActive(false);
+            repText.gameObject.SetActive(false);
+
+            // --- START MENU OVERLAY ---
+            BuildStartMenu(canvasGO.transform, logPanel.gameObject);
+        }
+
+        private void BuildStartMenu(Transform parent, GameObject logPanel)
+        {
+            var menuPanelRect = CreatePanel(parent, Vector2.zero, new Vector2(500, 300), new Color(0.12f, 0.12f, 0.15f, 0.98f));
+            startMenuPanel = menuPanelRect.gameObject;
+
+            CreateText(startMenuPanel.transform, new Vector2(0, -30), new Vector2(400, 40), 24, "WELCOME TO POKER SOCIAL");
+            CreateText(startMenuPanel.transform, new Vector2(0, -80), new Vector2(400, 30), 16, "Enter Your Name:");
+
+            // Input Field
+            var inputGO = new GameObject("NameInputField");
+            inputGO.transform.SetParent(startMenuPanel.transform, false);
+            var inputImg = inputGO.AddComponent<Image>();
+            inputImg.color = new Color(0.2f, 0.2f, 0.25f, 1f);
+
+            var inputRect = inputGO.GetComponent<RectTransform>();
+            inputRect.anchorMin = new Vector2(0.5f, 1f);
+            inputRect.anchorMax = new Vector2(0.5f, 1f);
+            inputRect.anchoredPosition = new Vector2(0, -120);
+            inputRect.sizeDelta = new Vector2(300, 40);
+
+            nameInputField = inputGO.AddComponent<InputField>();
+
+            var textGO = new GameObject("Text");
+            textGO.transform.SetParent(inputGO.transform, false);
+            var inputText = textGO.AddComponent<Text>();
+            inputText.font = GetDefaultFont(18);
+            inputText.fontSize = 18;
+            inputText.color = Color.white;
+            inputText.alignment = TextAnchor.MiddleCenter;
+
+            var tRect = textGO.GetComponent<RectTransform>();
+            tRect.anchorMin = Vector2.zero;
+            tRect.anchorMax = Vector2.one;
+            tRect.sizeDelta = Vector2.zero;
+
+            nameInputField.textComponent = inputText;
+
+            // Join Game Button
+            buttonPlacementIndex = 0;
+            var joinBtn = CreateButton(startMenuPanel.transform, "Join Table", () => OnJoinGameClicked(logPanel));
+            var joinBtnRect = joinBtn.GetComponent<RectTransform>();
+            joinBtnRect.anchoredPosition = new Vector2(0, -200);
+        }
+
+        private void OnJoinGameClicked(GameObject logPanel)
+        {
+            if (!string.IsNullOrEmpty(nameInputField.text.Trim()))
+            {
+                playerName = nameInputField.text.Trim();
+            }
+
+            startMenuPanel.SetActive(false);
+
+            // Show table elements
+            tableFelt.gameObject.SetActive(true);
+            actionPanel.gameObject.SetActive(true);
+            logPanel.SetActive(true);
+            repText.gameObject.SetActive(true);
+
+            // Initialize game with player's custom name
             SetupPlayers();
             table = new TableState { tableId = "table-1", tableName = "Table 1" };
             table.seatedPlayers = players;
@@ -83,52 +252,6 @@ namespace PokerSocial.Core
                 Log($"{players.First(p => p.playerId == id).displayName} broadcasts a fake tell: {tell}");
             reputationManager.OnReputationChanged += (t, rep) =>
                 repText.text = $"Table reputation: {rep:F2}  |  Stakes cap: {t.stakesCap}";
-        }
-
-        // ---------------- UI ----------------
-
-        private void BuildUI()
-        {
-            if (FindObjectOfType<EventSystem>() == null)
-            {
-                var esGO = new GameObject("EventSystem");
-                esGO.AddComponent<EventSystem>();
-                esGO.AddComponent<StandaloneInputModule>();
-            }
-
-            var canvasGO = new GameObject("PokerCanvas");
-            var canvas = canvasGO.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-
-            var scaler = canvasGO.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1600, 900);
-            canvasGO.AddComponent<GraphicRaycaster>();
-
-            // Table Felt & Deck Anchor
-            tableFelt = CreatePanel(canvasGO.transform, Vector2.zero, new Vector2(1100, 550), new Color(0.1f, 0.4f, 0.2f, 1f));
-            deckAnchor = CreateAnchor(tableFelt, new Vector2(0, 40));
-
-            // Pot & Reputation Labels
-            potText = CreateText(tableFelt, new Vector2(0, -20), new Vector2(300, 40), 28, "Pot: 0");
-            repText = CreateText(canvasGO.transform, new Vector2(0, -420), new Vector2(800, 30), 18, "Table reputation: 1.00 | Stakes cap: 1000");
-
-            // Action Panel & UI Buttons
-            actionPanel = CreatePanel(canvasGO.transform, new Vector2(600, 0), new Vector2(300, 360), new Color(0.15f, 0.15f, 0.18f, 0.95f));
-
-            buttonPlacementIndex = 0;
-            foldBtn = CreateButton(actionPanel, "Fold", OnFoldClicked);
-            checkBtn = CreateButton(actionPanel, "Check", OnCheckClicked);
-            bluffBtn = CreateButton(actionPanel, "Call Bluff (Seat 2)", OnBluffClicked);
-            strongBtn = CreateButton(actionPanel, "Call Strong (Seat 2)", OnStrongClicked);
-            allianceBtn = CreateButton(actionPanel, "Alliance (Seat 3)", OnAllianceClicked);
-            tellBtn = CreateButton(actionPanel, "Broadcast Fake Tell", OnTellClicked);
-            newHandBtn = CreateButton(actionPanel, "Next Hand", OnNewHandClicked);
-
-            // Activity Log Panel
-            var logPanel = CreatePanel(canvasGO.transform, new Vector2(-580, 0), new Vector2(340, 500), new Color(0.05f, 0.05f, 0.05f, 0.85f));
-            logText = CreateText(logPanel, Vector2.zero, new Vector2(320, 480), 14, "");
-            logText.alignment = TextAnchor.UpperLeft;
         }
 
         private RectTransform CreatePanel(Transform parent, Vector2 pos, Vector2 size, Color color)
@@ -160,7 +283,7 @@ namespace PokerSocial.Core
             var go = new GameObject("Text");
             go.transform.SetParent(parent, false);
             var text = go.AddComponent<Text>();
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            text.font = GetDefaultFont(fontSize);
             text.fontSize = fontSize;
             text.color = Color.white;
             text.alignment = TextAnchor.UpperCenter;
@@ -171,6 +294,13 @@ namespace PokerSocial.Core
             rect.anchoredPosition = pos;
             rect.sizeDelta = size;
             return text;
+        }
+
+        private Font GetDefaultFont(int fontSize)
+        {
+            Font defaultFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            if (defaultFont == null) defaultFont = Font.CreateDynamicFontFromOSFont("Arial", fontSize);
+            return defaultFont;
         }
 
         private Button CreateButton(Transform parent, string label, UnityEngine.Events.UnityAction onClick)
@@ -188,13 +318,13 @@ namespace PokerSocial.Core
             buttonPlacementIndex++;
 
             var btn = go.AddComponent<Button>();
-            btn.transition = Selectable.Transition.None; // stop Unity from auto-overriding our manual color
+            btn.transition = Selectable.Transition.None;
             btn.onClick.AddListener(onClick);
 
             var textGO = new GameObject("Label");
             textGO.transform.SetParent(go.transform, false);
             var text = textGO.AddComponent<Text>();
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            text.font = GetDefaultFont(15);
             text.fontSize = 15;
             text.color = Color.white;
             text.alignment = TextAnchor.MiddleCenter;
@@ -210,10 +340,16 @@ namespace PokerSocial.Core
 
         private void SetupPlayers()
         {
-            string[] names = { "Alice (You)", "Bob", "Carla", "Dev", "Eli", "Fay" };
+            string[] defaultBotNames = { "Bob", "Carla", "Dev", "Eli", "Fay" };
             players.Clear();
-            for (int i = 0; i < playerCount; i++)
-                players.Add(new PlayerData($"p{i}", names[i % names.Length], startingChips));
+
+            // Seat 0 is the human player with custom name
+            players.Add(new PlayerData("p0", playerName, startingChips));
+
+            for (int i = 1; i < playerCount; i++)
+            {
+                players.Add(new PlayerData($"p{i}", defaultBotNames[(i - 1) % defaultBotNames.Length], startingChips));
+            }
 
             float radius = 380f;
             for (int i = 0; i < players.Count; i++)
@@ -229,18 +365,19 @@ namespace PokerSocial.Core
             }
         }
 
-        // ---------------- Hand flow ----------------
-
         private IEnumerator RunHand()
         {
-            Log("=== NEW HAND ===");
+            Log("=== NEW HAND (Texas Hold 'em) ===");
             newHandBtn.gameObject.SetActive(false);
-            ClearSeats();
+            ClearTable();
 
             pot = 0;
+            highestBet = 0;
+
             foreach (var p in players)
             {
                 stillIn[p.playerId] = true;
+                currentBets[p.playerId] = 0;
                 int a = Mathf.Min(ante, p.chipStack);
                 p.chipStack -= a;
                 pot += a;
@@ -250,95 +387,69 @@ namespace PokerSocial.Core
             UpdatePotText();
 
             var deck = new Deck();
-            yield return StartCoroutine(ShuffleAnimation());
-            yield return StartCoroutine(DealAnimation(deck));
 
+            // 1. PRE-FLOP
+            yield return StartCoroutine(DealHoleCards(deck));
             foreach (var cv in seatCards[players[0].playerId])
                 yield return StartCoroutine(cv.FlipRoutine());
 
-            Log($"{players[0].displayName}: fold, or check to use the social tools and go to showdown.");
-            SetActionButtonsInteractable(true);
-            humanFolded = false;
-            waitingForHumanDecision = true;
-            yield return new WaitUntil(() => !waitingForHumanDecision);
-            SetActionButtonsInteractable(false);
+            yield return StartCoroutine(PlayerActionRound("Pre-Flop"));
+            if (CountActive() <= 1) { yield return StartCoroutine(Showdown()); yield break; }
 
-            if (humanFolded)
-            {
-                stillIn[players[0].playerId] = false;
-                Log($"{players[0].displayName} folds.");
-            }
+            // 2. FLOP
+            ResetRoundBets();
+            yield return StartCoroutine(DealCommunityCards(deck, 3));
+            yield return StartCoroutine(PlayerActionRound("Flop"));
+            if (CountActive() <= 1) { yield return StartCoroutine(Showdown()); yield break; }
 
-            yield return StartCoroutine(OpponentDecisions());
+            // 3. TURN
+            ResetRoundBets();
+            yield return StartCoroutine(DealCommunityCards(deck, 1));
+            yield return StartCoroutine(PlayerActionRound("Turn"));
+            if (CountActive() <= 1) { yield return StartCoroutine(Showdown()); yield break; }
+
+            // 4. RIVER
+            ResetRoundBets();
+            yield return StartCoroutine(DealCommunityCards(deck, 1));
+            yield return StartCoroutine(PlayerActionRound("River"));
+
+            // 5. SHOWDOWN
             yield return StartCoroutine(Showdown());
         }
 
-        /// <summary>
-        /// Each still-in opponent decides fold/call. If llmBrain is attached,
-        /// this asks it (one async request per opponent, in turn) and honors
-        /// the fold/tableTalk it returns. If not, everyone just calls -
-        /// identical to the old always-call behavior.
-        /// </summary>
-        private IEnumerator OpponentDecisions()
+        private void ResetRoundBets()
         {
-            if (llmBrain == null) yield break;
-
-            foreach (var p in players)
-            {
-                if (p.playerId == players[0].playerId) continue; // human already decided
-                if (!stillIn[p.playerId]) continue;
-
-                string handDesc = HandEvaluator.Evaluate(seatCards[p.playerId].Select(cv => cv.Card).ToList()).description;
-
-                bool done = false;
-                LLMOpponentBrain.Decision decision = null;
-                llmBrain.RequestDecision(p.displayName, handDesc, pot, p.chipStack, d => { decision = d; done = true; });
-                yield return new WaitUntil(() => done);
-
-                if (decision != null && decision.action == "fold")
-                {
-                    stillIn[p.playerId] = false;
-                    Log($"{p.displayName} folds.");
-                }
-                else if (decision != null && !string.IsNullOrEmpty(decision.tableTalk))
-                {
-                    Log($"{p.displayName}: \"{decision.tableTalk}\"");
-                }
-            }
+            highestBet = 0;
+            foreach (var p in players) currentBets[p.playerId] = 0;
         }
 
-        private IEnumerator ShuffleAnimation()
+        private IEnumerator PlayerActionRound(string roundName)
         {
-            Log("Shuffling...");
-            var backs = new List<CardView>();
-            for (int i = 0; i < 6; i++)
+            Log($"-- Action Phase: {roundName} --");
+            var human = players[0];
+
+            if (stillIn[human.playerId])
             {
-                var cv = CardView.Create(tableFelt, new Vector2(70, 100));
-                cv.Rect.anchoredPosition = deckAnchor.anchoredPosition +
-                    new Vector2(UnityEngine.Random.Range(-8, 8), UnityEngine.Random.Range(-4, 4));
-                backs.Add(cv);
+                int toCall = highestBet - currentBets[human.playerId];
+                callCheckText.text = toCall > 0 ? $"Call ({toCall})" : "Check";
+
+                SetActionButtonsInteractable(true);
+                humanFolded = false;
+                waitingForHumanDecision = true;
+
+                yield return new WaitUntil(() => !waitingForHumanDecision);
+                SetActionButtonsInteractable(false);
             }
-            for (int r = 0; r < 8; r++)
-            {
-                foreach (var cv in backs)
-                {
-                    Vector2 jitter = new Vector2(UnityEngine.Random.Range(-14, 14), UnityEngine.Random.Range(-8, 8));
-                    yield return StartCoroutine(cv.MoveRoutine(deckAnchor.anchoredPosition + jitter, 0.04f));
-                }
-            }
-            foreach (var cv in backs)
-            {
-                yield return StartCoroutine(cv.MoveRoutine(deckAnchor.anchoredPosition, 0.06f));
-                Destroy(cv.gameObject);
-            }
+
+            yield return StartCoroutine(OpponentDecisions());
         }
 
-        private IEnumerator DealAnimation(Deck deck)
+        private IEnumerator DealHoleCards(Deck deck)
         {
             foreach (var p in players)
                 seatCards[p.playerId] = new List<CardView>();
 
-            for (int round = 0; round < 5; round++)
+            for (int round = 0; round < 2; round++)
             {
                 foreach (var p in players)
                 {
@@ -349,12 +460,83 @@ namespace PokerSocial.Core
 
                     var seat = seatAnchors[p.playerId];
                     int idx = seatCards[p.playerId].Count;
-                    Vector2 offset = new Vector2((idx - 2) * 40, -10);
+                    Vector2 offset = new Vector2((idx - 0.5f) * 45, -10);
                     Vector2 target = seat.anchoredPosition + offset;
 
                     seatCards[p.playerId].Add(cv);
-                    yield return StartCoroutine(cv.MoveRoutine(target, 0.16f));
+                    yield return StartCoroutine(cv.MoveRoutine(target, 0.12f));
                 }
+            }
+        }
+
+        private IEnumerator DealCommunityCards(Deck deck, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                var card = deck.Draw();
+                communityCards.Add(card);
+
+                var cv = CardView.Create(tableFelt, new Vector2(70, 100));
+                cv.Setup(card);
+                cv.Rect.anchoredPosition = deckAnchor.anchoredPosition;
+
+                int idx = communityCardViews.Count;
+                Vector2 target = communityAnchor.anchoredPosition + new Vector2((idx - 2) * 80, 0);
+
+                communityCardViews.Add(cv);
+                yield return StartCoroutine(cv.MoveRoutine(target, 0.15f));
+                yield return StartCoroutine(cv.FlipRoutine());
+            }
+        }
+
+        private IEnumerator OpponentDecisions()
+        {
+            foreach (var p in players)
+            {
+                if (p.playerId == players[0].playerId || !stillIn[p.playerId]) continue;
+
+                var fullHand = seatCards[p.playerId].Select(cv => cv.Card).Concat(communityCards).ToList();
+
+                string handDesc = fullHand.Count >= 5
+                    ? HandEvaluator.Evaluate(fullHand).description
+                    : "Pre-flop / Early round";
+
+                int callAmount = highestBet - currentBets[p.playerId];
+
+                if (llmBrain != null)
+                {
+                    bool done = false;
+                    LLMOpponentBrain.Decision decision = null;
+                    llmBrain.RequestDecision(p.displayName, handDesc, pot, p.chipStack, d => { decision = d; done = true; });
+                    yield return new WaitUntil(() => done);
+
+                    if (decision != null && decision.action == "fold" && callAmount > 0)
+                    {
+                        stillIn[p.playerId] = false;
+                        Log($"{p.displayName} folds.");
+                        continue;
+                    }
+                    else if (decision != null && !string.IsNullOrEmpty(decision.tableTalk))
+                    {
+                        Log($"{p.displayName}: \"{decision.tableTalk}\"");
+                    }
+                }
+
+                if (callAmount > 0)
+                {
+                    int paid = Mathf.Min(callAmount, p.chipStack);
+                    p.chipStack -= paid;
+                    currentBets[p.playerId] += paid;
+                    pot += paid;
+                    Log($"{p.displayName} calls {paid}.");
+                }
+                else
+                {
+                    Log($"{p.displayName} checks.");
+                }
+
+                UpdateSeatLabel(p);
+                UpdatePotText();
             }
         }
 
@@ -373,8 +555,13 @@ namespace PokerSocial.Core
             foreach (var p in players)
             {
                 if (!stillIn[p.playerId]) continue;
-                var cards = seatCards[p.playerId].Select(cv => cv.Card).ToList();
-                var eval = HandEvaluator.Evaluate(cards);
+
+                var fullHand = seatCards[p.playerId].Select(cv => cv.Card).Concat(communityCards).ToList();
+
+                var eval = fullHand.Count >= 5
+                    ? HandEvaluator.Evaluate(fullHand)
+                    : new HandEvaluation { rank = HandRank.HighCard, description = "Incomplete Hand" };
+
                 Log($"{p.displayName}: {eval.description}");
                 if (winner == null || HandEvaluator.Compare(eval, bestEval) > 0)
                 {
@@ -383,34 +570,77 @@ namespace PokerSocial.Core
                 }
             }
 
-            winner.chipStack += pot;
-            Log($"\nWINNER: {winner.displayName} takes the pot of {pot} with {bestEval.description}");
-            foreach (var p in players) UpdateSeatLabel(p);
-
-            table.RecordHandResult(new HandRecord
+            if (winner != null)
             {
-                handId = Guid.NewGuid().ToString(),
-                timestamp = DateTime.UtcNow,
-                participantIds = players.Where(p => stillIn[p.playerId]).Select(p => p.playerId).ToList(),
-                winnerIds = new List<string> { winner.playerId }
-            });
-            reputationManager.ApplyCleanHandBonus(table);
+                winner.chipStack += pot;
+                Log($"\nWINNER: {winner.displayName} takes pot of {pot} with {bestEval.description}");
+            }
 
+            foreach (var p in players) UpdateSeatLabel(p);
             newHandBtn.gameObject.SetActive(true);
         }
 
-        private void ClearSeats()
+        private void ClearTable()
         {
             foreach (var kvp in seatCards)
                 foreach (var cv in kvp.Value)
                     if (cv != null) Destroy(cv.gameObject);
             seatCards.Clear();
+
+            foreach (var cv in communityCardViews)
+                if (cv != null) Destroy(cv.gameObject);
+            communityCardViews.Clear();
+            communityCards.Clear();
         }
 
-        // ---------------- Button handlers ----------------
+        private int CountActive() => stillIn.Values.Count(v => v);
 
-        private void OnFoldClicked() { humanFolded = true; waitingForHumanDecision = false; }
-        private void OnCheckClicked() { waitingForHumanDecision = false; }
+        private void OnFoldClicked()
+        {
+            stillIn[players[0].playerId] = false;
+            humanFolded = true;
+            Log("You folded.");
+            waitingForHumanDecision = false;
+        }
+
+        private void OnCallCheckClicked()
+        {
+            var human = players[0];
+            int toCall = highestBet - currentBets[human.playerId];
+            if (toCall > 0)
+            {
+                int paid = Mathf.Min(toCall, human.chipStack);
+                human.chipStack -= paid;
+                currentBets[human.playerId] += paid;
+                pot += paid;
+                Log($"You call {paid}.");
+            }
+            else
+            {
+                Log("You check.");
+            }
+            UpdateSeatLabel(human);
+            UpdatePotText();
+            waitingForHumanDecision = false;
+        }
+
+        private void OnRaiseClicked()
+        {
+            var human = players[0];
+            int toCall = highestBet - currentBets[human.playerId];
+            int totalRaise = toCall + humanRaiseAmount;
+            int paid = Mathf.Min(totalRaise, human.chipStack);
+
+            human.chipStack -= paid;
+            currentBets[human.playerId] += paid;
+            highestBet = currentBets[human.playerId];
+            pot += paid;
+
+            Log($"You raise to {highestBet} (+{humanRaiseAmount}).");
+            UpdateSeatLabel(human);
+            UpdatePotText();
+            waitingForHumanDecision = false;
+        }
 
         private void OnBluffClicked() => DeclareReadOnSeatTwo(claimingBluff: true);
         private void OnStrongClicked() => DeclareReadOnSeatTwo(claimingBluff: false);
@@ -423,8 +653,9 @@ namespace PokerSocial.Core
                 var reader = players[0];
                 var target = players[1];
                 var read = readSystem.DeclareRead(reader, target, claimingBluff);
-                bool actuallyBluffing =
-                    HandEvaluator.Evaluate(seatCards[target.playerId].Select(cv => cv.Card).ToList()).rank <= HandRank.Pair;
+                var fullHand = seatCards[target.playerId].Select(cv => cv.Card).Concat(communityCards).ToList();
+
+                bool actuallyBluffing = fullHand.Count >= 5 && HandEvaluator.Evaluate(fullHand).rank <= HandRank.Pair;
                 readSystem.ResolveRead(read, reader, actuallyBluffing);
                 Log($"Read was {(read.wasCorrect ? "CORRECT" : "WRONG")} — {reader.displayName}'s accuracy now {reader.ReadAccuracy:P0}");
                 UpdateSeatLabel(reader);
@@ -457,12 +688,11 @@ namespace PokerSocial.Core
 
         private void OnNewHandClicked() => StartCoroutine(RunHand());
 
-        // ---------------- helpers ----------------
-
         private void SetActionButtonsInteractable(bool value)
         {
             foldBtn.interactable = value;
-            checkBtn.interactable = value;
+            callCheckBtn.interactable = value;
+            raiseBtn.interactable = value;
             bluffBtn.interactable = value;
             strongBtn.interactable = value;
             allianceBtn.interactable = value;
@@ -481,7 +711,17 @@ namespace PokerSocial.Core
         private void Log(string line)
         {
             logText.text += line + "\n";
+            StartCoroutine(ScrollToBottomNextFrame());
             Debug.Log(line);
+        }
+
+        private IEnumerator ScrollToBottomNextFrame()
+        {
+            yield return new WaitForEndOfFrame();
+            if (scrollRect != null)
+            {
+                scrollRect.verticalNormalizedPosition = 0f;
+            }
         }
     }
 }
