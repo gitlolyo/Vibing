@@ -25,8 +25,8 @@ namespace PokerSocial.Core
         private Text potText;
         private Text repText;
         private Text logText;
-        private ScrollRect scrollRect;
         private Transform actionPanel;
+        private GameObject logPanelGO;
         private int buttonPlacementIndex = 0;
 
         private readonly List<PlayerData> players = new();
@@ -48,34 +48,40 @@ namespace PokerSocial.Core
         private int highestBet;
         private bool waitingForHumanDecision;
         private bool humanFolded;
-        private int humanRaiseAmount = 50;
         private string playerName = "Player";
 
-        private Button foldBtn, callCheckBtn, raiseBtn, bluffBtn, strongBtn, allianceBtn, tellBtn, newHandBtn;
+        private Button foldBtn, callCheckBtn, halfPotBtn, potBtn, allInBtn, bluffBtn, strongBtn, allianceBtn, tellBtn, newHandBtn;
         private Text callCheckText;
 
         private CloudBallerTracker cloudManager;
+
+        private Sprite customCardBack;
+        private Sprite customTableFelt;
+        private Sprite customBackground;
+
+        private void LoadCustomTextures()
+        {
+            customCardBack = Resources.Load<Sprite>("CardBack");
+            customTableFelt = Resources.Load<Sprite>("TableFelt");
+            customBackground = Resources.Load<Sprite>("Background");
+        }
 
         private async void Start()
         {
             llmBrain = GetComponent<LLMOpponentBrain>();
 
-            // 1. Check if manager exists on this GameObject or ANY object in the scene
-            var cloudTracker = FindObjectOfType<CloudBallerTracker>();
-
-            // 2. Only add it dynamically if it doesn't exist anywhere in the scene
+            var cloudTracker = FindAnyObjectByType<CloudBallerTracker>();
             if (cloudTracker == null)
             {
                 cloudTracker = gameObject.AddComponent<CloudBallerTracker>();
             }
 
-            // 3. Load chips after ensuring a single instance is used
-            startingChips = await cloudTracker.LoadChipsAsync(1000);
+            cloudManager = cloudTracker;
+            startingChips = await cloudManager.LoadChipsAsync(1000);
 
             BuildUI();
         }
 
-        // Call whenever a hand finishes
         private async void OnHandComplete(int newChipTotal)
         {
             await cloudManager.SaveChipsAsync(newChipTotal);
@@ -83,13 +89,7 @@ namespace PokerSocial.Core
 
         private void BuildUI()
         {
-            if (FindObjectOfType<EventSystem>() == null)
-            {
-                var esGO = new GameObject("EventSystem");
-                esGO.AddComponent<EventSystem>();
-                esGO.AddComponent<StandaloneInputModule>();
-            }
-
+            // 1. Canvas Setup
             var canvasGO = new GameObject("PokerCanvas");
             var canvas = canvasGO.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -98,48 +98,117 @@ namespace PokerSocial.Core
             scaler.referenceResolution = new Vector2(1600, 900);
             canvasGO.AddComponent<GraphicRaycaster>();
 
-            // --- TABLE UI (Hidden initially) ---
-            tableFelt = CreatePanel(canvasGO.transform, Vector2.zero, new Vector2(1100, 550), new Color(0.1f, 0.4f, 0.2f, 1f));
-            deckAnchor = CreateAnchor(tableFelt, new Vector2(-250, 0));
+            LoadCustomTextures();
+
+            // 2. Background
+            if (customBackground != null)
+            {
+                var bgGO = new GameObject("Background");
+                bgGO.transform.SetParent(canvasGO.transform, false);
+                bgGO.transform.SetAsFirstSibling();
+
+                var bgImg = bgGO.AddComponent<Image>();
+                bgImg.sprite = customBackground;
+
+                var bgRect = bgGO.GetComponent<RectTransform>();
+                bgRect.anchorMin = Vector2.zero;
+                bgRect.anchorMax = Vector2.one;
+                bgRect.sizeDelta = Vector2.zero;
+            }
+
+            if (FindAnyObjectByType<EventSystem>() == null)
+            {
+                var esGO = new GameObject("EventSystem");
+                esGO.AddComponent<EventSystem>();
+                esGO.AddComponent<StandaloneInputModule>();
+            }
+
+            // 3. Table Felt Panel
+            tableFelt = CreatePanel(canvasGO.transform, Vector2.zero, new Vector2(880, 480), new Color(0, 0, 0, 0));
+
+            if (customTableFelt != null)
+            {
+                var feltImg = tableFelt.GetComponent<Image>();
+                feltImg.sprite = customTableFelt;
+                feltImg.color = Color.white;
+            }
+
+            // 4. Anchors & Dedicated Layout Slots
+            deckAnchor = CreateAnchor(tableFelt, new Vector2(-360, 0));
             communityAnchor = CreateAnchor(tableFelt, new Vector2(0, 0));
 
-            potText = CreateText(tableFelt, new Vector2(0, -120), new Vector2(300, 40), 28, "Pot: 0");
-            repText = CreateText(canvasGO.transform, new Vector2(0, -420), new Vector2(800, 30), 18, "Table reputation: 1.00  |  Stakes cap: 1000");
+            // Fixed, non-overlapping 4-player seat positions
+            seatAnchors["player_bottom"] = CreateAnchor(tableFelt, new Vector2(0, -155));
+            seatAnchors["player_top_left"] = CreateAnchor(tableFelt, new Vector2(-190, 140));
+            seatAnchors["player_top_right"] = CreateAnchor(tableFelt, new Vector2(190, 140));
+            seatAnchors["player_left"] = CreateAnchor(tableFelt, new Vector2(-310, 0));
 
-            actionPanel = CreatePanel(canvasGO.transform, new Vector2(600, 0), new Vector2(300, 420), new Color(0.15f, 0.15f, 0.18f, 0.95f));
+            // Header UI: Centered Pot & Isolated Reputation Bar
+            potText = CreateText(tableFelt, new Vector2(0, 205), new Vector2(300, 32), 24, "Pot: 0");
+
+            // Dedicated Info Bar positioned cleanly above community space
+            var infoBar = CreatePanel(tableFelt, new Vector2(0, 175), new Vector2(480, 24), new Color(0, 0, 0, 0.4f));
+            repText = CreateText(infoBar, Vector2.zero, new Vector2(460, 20), 13, "Table reputation: 1.00  |  Stakes cap: 1000");
+
+            // 5. Side Panels: Control Buttons (Snapped to Right Edge of Table Felt)
+            var actionPanelGO = new GameObject("ActionPanel");
+            actionPanelGO.transform.SetParent(canvasGO.transform, false);
+            var actionImg = actionPanelGO.AddComponent<Image>();
+            actionImg.color = new Color(0.15f, 0.15f, 0.18f, 0.95f);
+
+            var actionRect = actionPanelGO.GetComponent<RectTransform>();
+            actionRect.anchorMin = new Vector2(0.5f, 0.5f); // Center anchor to match table
+            actionRect.anchorMax = new Vector2(0.5f, 0.5f);
+            actionRect.pivot = new Vector2(0.5f, 0.5f);
+            actionRect.anchoredPosition = PokerTableLayoutConfig.ActionPanelPos;
+            actionRect.sizeDelta = new Vector2(PokerTableLayoutConfig.ActionPanelWidth, 480f); // Matches table felt height
+
+            actionPanel = actionRect;
 
             buttonPlacementIndex = 0;
             foldBtn = CreateButton(actionPanel, "Fold", OnFoldClicked);
             callCheckBtn = CreateButton(actionPanel, "Check", OnCallCheckClicked);
             callCheckText = callCheckBtn.GetComponentInChildren<Text>();
-            raiseBtn = CreateButton(actionPanel, "Raise (+50)", OnRaiseClicked);
+
+            halfPotBtn = CreateButton(actionPanel, "Raise 1/2 Pot", OnHalfPotClicked);
+            potBtn = CreateButton(actionPanel, "Raise Pot", OnPotClicked);
+            allInBtn = CreateButton(actionPanel, "ALL-IN!", OnAllInClicked);
+
             bluffBtn = CreateButton(actionPanel, "Call Bluff (Seat 2)", OnBluffClicked);
             strongBtn = CreateButton(actionPanel, "Call Strong (Seat 2)", OnStrongClicked);
             allianceBtn = CreateButton(actionPanel, "Alliance (Seat 3)", OnAllianceClicked);
             tellBtn = CreateButton(actionPanel, "Broadcast Fake Tell", OnTellClicked);
+
             newHandBtn = CreateButton(actionPanel, "Next Hand", OnNewHandClicked);
 
-            // Log Panel Setup
-            var logPanel = CreatePanel(canvasGO.transform, new Vector2(-600, 0), new Vector2(320, 480), new Color(0.15f, 0.15f, 0.18f, 0.95f));
-            var scrollGO = new GameObject("ScrollRect");
-            scrollGO.transform.SetParent(logPanel, false);
-            var srRect = scrollGO.AddComponent<RectTransform>();
-            srRect.anchorMin = Vector2.zero;
-            srRect.anchorMax = Vector2.one;
-            srRect.sizeDelta = new Vector2(-20, -20);
+            // 6. Side Panels: Event Log (Snapped to Left Edge of Table Felt)
+            var logPanelGO = new GameObject("LogPanel");
+            logPanelGO.transform.SetParent(canvasGO.transform, false);
+            var logImg = logPanelGO.AddComponent<Image>();
+            logImg.color = new Color(0.15f, 0.15f, 0.18f, 0.95f);
 
-            scrollRect = scrollGO.AddComponent<ScrollRect>();
-            scrollRect.scrollSensitivity = 45f;
-            scrollRect.movementType = ScrollRect.MovementType.Clamped;
-            scrollGO.AddComponent<RectMask2D>();
+            var logPanelRect = logPanelGO.GetComponent<RectTransform>();
+            logPanelRect.anchorMin = new Vector2(0.5f, 0.5f); // Center anchor to match table
+            logPanelRect.anchorMax = new Vector2(0.5f, 0.5f);
+            logPanelRect.pivot = new Vector2(0.5f, 0.5f);
+            logPanelRect.anchoredPosition = PokerTableLayoutConfig.LogPanelPos;
+            logPanelRect.sizeDelta = new Vector2(PokerTableLayoutConfig.LogPanelWidth, 480f); // Matches table felt height
+            this.logPanelGO = logPanelGO;
+
+            var viewportGO = new GameObject("Viewport", typeof(RectTransform), typeof(RectMask2D));
+            viewportGO.transform.SetParent(logPanelGO.transform, false);
+            var vpRect = viewportGO.GetComponent<RectTransform>();
+            vpRect.anchorMin = Vector2.zero;
+            vpRect.anchorMax = Vector2.one;
+            vpRect.sizeDelta = new Vector2(-20, -20);
 
             var contentGO = new GameObject("Content");
-            contentGO.transform.SetParent(scrollGO.transform, false);
+            contentGO.transform.SetParent(viewportGO.transform, false);
             var cRect = contentGO.AddComponent<RectTransform>();
-            cRect.anchorMin = new Vector2(0, 1);
-            cRect.anchorMax = new Vector2(1, 1);
-            cRect.pivot = new Vector2(0, 1);
-            cRect.sizeDelta = new Vector2(0, 0);
+            cRect.anchorMin = new Vector2(0, 0);
+            cRect.anchorMax = new Vector2(1, 0);
+            cRect.pivot = new Vector2(0, 0);
+            cRect.sizeDelta = Vector2.zero;
 
             var csf = contentGO.AddComponent<ContentSizeFitter>();
             csf.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
@@ -151,88 +220,103 @@ namespace PokerSocial.Core
             vlg.childForceExpandWidth = true;
             vlg.childForceExpandHeight = false;
 
-            logText = CreateText(contentGO.transform, Vector2.zero, Vector2.zero, 14, "");
-            logText.alignment = TextAnchor.UpperLeft;
+            logText = CreateText(contentGO.transform, Vector2.zero, Vector2.zero, PokerTableLayoutConfig.LogFontSize, "");
+            logText.alignment = TextAnchor.LowerLeft;
 
             var textLayout = logText.gameObject.AddComponent<LayoutElement>();
             textLayout.flexibleWidth = 1;
 
-            scrollRect.content = cRect;
-            scrollRect.vertical = true;
-            scrollRect.horizontal = false;
-
-            // Hide gameplay panels initially
+            // 7. Initial State Setup
             tableFelt.gameObject.SetActive(false);
             actionPanel.gameObject.SetActive(false);
-            logPanel.gameObject.SetActive(false);
-            repText.gameObject.SetActive(false);
+            logPanelGO.SetActive(false);
+            infoBar.gameObject.SetActive(false);
 
-            // --- START MENU OVERLAY ---
-            BuildStartMenu(canvasGO.transform, logPanel.gameObject);
+            // 8. Start Menu Overlay
+            BuildStartMenu(canvasGO.transform);
         }
 
-        private void BuildStartMenu(Transform parent, GameObject logPanel)
+        private void BuildStartMenu(Transform parent)
         {
-            var menuPanelRect = CreatePanel(parent, Vector2.zero, new Vector2(500, 300), new Color(0.12f, 0.12f, 0.15f, 0.98f));
+            // 1. Center Panel
+            var menuPanelRect = CreatePanel(parent, Vector2.zero, PokerTableLayoutConfig.StartMenuSize, new Color(0.12f, 0.12f, 0.15f, 0.98f));
             startMenuPanel = menuPanelRect.gameObject;
 
-            CreateText(startMenuPanel.transform, new Vector2(0, -30), new Vector2(400, 40), 24, "WELCOME TO POKER SOCIAL");
-            CreateText(startMenuPanel.transform, new Vector2(0, -80), new Vector2(400, 30), 16, "Enter Your Name:");
+            menuPanelRect.anchorMin = new Vector2(0.5f, 0.5f);
+            menuPanelRect.anchorMax = new Vector2(0.5f, 0.5f);
+            menuPanelRect.pivot = new Vector2(0.5f, 0.5f);
+            menuPanelRect.anchoredPosition = Vector2.zero;
 
-            // Input Field
+            // 2. Title Text
+            var headerText = CreateText(startMenuPanel.transform, new Vector2(0, 80), new Vector2(400, 40), 22, "WELCOME TO VIBING");
+            headerText.alignment = TextAnchor.MiddleCenter;
+
+            // 3. Subtitle
+            var labelText = CreateText(startMenuPanel.transform, new Vector2(0, 35), new Vector2(400, 30), 15, "Enter Your Name:");
+            labelText.alignment = TextAnchor.MiddleCenter;
+
+            // 4. Input Field Container
             var inputGO = new GameObject("NameInputField");
             inputGO.transform.SetParent(startMenuPanel.transform, false);
+
             var inputImg = inputGO.AddComponent<Image>();
             inputImg.color = new Color(0.2f, 0.2f, 0.25f, 1f);
 
             var inputRect = inputGO.GetComponent<RectTransform>();
-            inputRect.anchorMin = new Vector2(0.5f, 1f);
-            inputRect.anchorMax = new Vector2(0.5f, 1f);
-            inputRect.anchoredPosition = new Vector2(0, -120);
-            inputRect.sizeDelta = new Vector2(300, 40);
+            inputRect.anchorMin = new Vector2(0.5f, 0.5f);
+            inputRect.anchorMax = new Vector2(0.5f, 0.5f);
+            inputRect.pivot = new Vector2(0.5f, 0.5f);
+            inputRect.anchoredPosition = new Vector2(0, -10);
+            inputRect.sizeDelta = new Vector2(280, 40);
 
             nameInputField = inputGO.AddComponent<InputField>();
 
+            // Input Field Text Child
             var textGO = new GameObject("Text");
             textGO.transform.SetParent(inputGO.transform, false);
             var inputText = textGO.AddComponent<Text>();
-            inputText.font = GetDefaultFont(18);
-            inputText.fontSize = 18;
+            inputText.font = GetDefaultFont(16);
+            inputText.fontSize = 16;
             inputText.color = Color.white;
             inputText.alignment = TextAnchor.MiddleCenter;
 
             var tRect = textGO.GetComponent<RectTransform>();
             tRect.anchorMin = Vector2.zero;
             tRect.anchorMax = Vector2.one;
-            tRect.sizeDelta = Vector2.zero;
+            tRect.offsetMin = new Vector2(10, 0);
+            tRect.offsetMax = new Vector2(-10, 0);
 
             nameInputField.textComponent = inputText;
 
-            // Join Game Button
-            buttonPlacementIndex = 0;
-            var joinBtn = CreateButton(startMenuPanel.transform, "Join Table", () => OnJoinGameClicked(logPanel));
-            var joinBtnRect = joinBtn.GetComponent<RectTransform>();
-            joinBtnRect.anchoredPosition = new Vector2(0, -200);
+            // 5. Join Button (Get RectTransform from the returned Button component)
+            Button joinBtn = CreateButton(startMenuPanel.transform, "Join Table", OnJoinGameClicked);
+            RectTransform joinBtnRect = joinBtn.GetComponent<RectTransform>();
+            joinBtnRect.anchorMin = new Vector2(0.5f, 0.5f);
+            joinBtnRect.anchorMax = new Vector2(0.5f, 0.5f);
+            joinBtnRect.pivot = new Vector2(0.5f, 0.5f);
+            joinBtnRect.anchoredPosition = new Vector2(0, -75);
+            joinBtnRect.sizeDelta = new Vector2(200, 40);
         }
 
-        private void OnJoinGameClicked(GameObject logPanel)
+        private void OnJoinGameClicked()
         {
-            if (!string.IsNullOrEmpty(nameInputField.text.Trim()))
+            if (nameInputField != null && !string.IsNullOrEmpty(nameInputField.text.Trim()))
             {
                 playerName = nameInputField.text.Trim();
             }
 
-            startMenuPanel.SetActive(false);
+            if (startMenuPanel != null) startMenuPanel.SetActive(false);
+            if (tableFelt != null) tableFelt.gameObject.SetActive(true);
+            if (actionPanel != null) actionPanel.gameObject.SetActive(true);
+            if (logPanelGO != null) logPanelGO.SetActive(true);
+            if (repText != null && repText.transform.parent != null) repText.transform.parent.gameObject.SetActive(true);
 
-            // Show table elements
-            tableFelt.gameObject.SetActive(true);
-            actionPanel.gameObject.SetActive(true);
-            logPanel.SetActive(true);
-            repText.gameObject.SetActive(true);
-
-            // Initialize game with player's custom name
             SetupPlayers();
-            table = new TableState { tableId = "table-1", tableName = "Table 1" };
+            table = new TableState
+            {
+                tableId = "table-1",
+                tableName = "Table 1"
+            };
             table.seatedPlayers = players;
 
             WireLogging();
@@ -286,11 +370,11 @@ namespace PokerSocial.Core
             text.font = GetDefaultFont(fontSize);
             text.fontSize = fontSize;
             text.color = Color.white;
-            text.alignment = TextAnchor.UpperCenter;
+            text.alignment = TextAnchor.MiddleCenter;
             text.text = content;
             var rect = go.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.5f, 1f);
-            rect.anchorMax = new Vector2(0.5f, 1f);
+            rect.anchorMin = new Vector2(0.5f, 0.5f);
+            rect.anchorMax = new Vector2(0.5f, 0.5f);
             rect.anchoredPosition = pos;
             rect.sizeDelta = size;
             return text;
@@ -303,47 +387,52 @@ namespace PokerSocial.Core
             return defaultFont;
         }
 
-        private Button CreateButton(Transform parent, string label, UnityEngine.Events.UnityAction onClick)
+        private Button CreateButton(Transform parent, string text, UnityEngine.Events.UnityAction onClick)
         {
-            var go = new GameObject("Button_" + label);
-            go.transform.SetParent(parent, false);
-            var img = go.AddComponent<Image>();
-            img.color = new Color(0.55f, 0.55f, 0.6f, 1f);
-            var rect = go.GetComponent<RectTransform>();
+            var btnGO = new GameObject("Btn_" + text);
+            btnGO.transform.SetParent(parent, false);
+
+            var img = btnGO.AddComponent<Image>();
+            img.color = new Color(0.25f, 0.25f, 0.3f, 1f);
+
+            var btn = btnGO.AddComponent<Button>();
+            btn.onClick.AddListener(onClick);
+
+            // Anchor to top-center of the parent panel
+            var rect = btnGO.GetComponent<RectTransform>();
             rect.anchorMin = new Vector2(0.5f, 1f);
             rect.anchorMax = new Vector2(0.5f, 1f);
             rect.pivot = new Vector2(0.5f, 1f);
-            rect.sizeDelta = new Vector2(260, 34);
-            rect.anchoredPosition = new Vector2(0, -10 - buttonPlacementIndex * 40);
+
+            // Stack downwards starting from top padding
+            float yOffset = -PokerTableLayoutConfig.ButtonTopPadding - (buttonPlacementIndex * PokerTableLayoutConfig.ButtonVerticalSpacing);
+            rect.anchoredPosition = new Vector2(0, yOffset);
+            rect.sizeDelta = PokerTableLayoutConfig.ButtonSize;
+
             buttonPlacementIndex++;
 
-            var btn = go.AddComponent<Button>();
-            btn.transition = Selectable.Transition.None;
-            btn.onClick.AddListener(onClick);
+            var textGO = new GameObject("Text");
+            textGO.transform.SetParent(btnGO.transform, false);
+            var txt = textGO.AddComponent<Text>();
+            txt.font = GetDefaultFont(13);
+            txt.fontSize = 13;
+            txt.color = Color.white;
+            txt.alignment = TextAnchor.MiddleCenter;
+            txt.text = text;
 
-            var textGO = new GameObject("Label");
-            textGO.transform.SetParent(go.transform, false);
-            var text = textGO.AddComponent<Text>();
-            text.font = GetDefaultFont(15);
-            text.fontSize = 15;
-            text.color = Color.white;
-            text.alignment = TextAnchor.MiddleCenter;
-            text.text = label;
             var tRect = textGO.GetComponent<RectTransform>();
             tRect.anchorMin = Vector2.zero;
             tRect.anchorMax = Vector2.one;
-            tRect.offsetMin = Vector2.zero;
-            tRect.offsetMax = Vector2.zero;
+            tRect.sizeDelta = Vector2.zero;
 
             return btn;
         }
 
         private void SetupPlayers()
         {
-            string[] defaultBotNames = { "Bob", "Carla", "Dev", "Eli", "Fay" };
+            string[] defaultBotNames = { "Bob", "Carla", "Dev" };
             players.Clear();
 
-            // Seat 0 is the human player with custom name
             players.Add(new PlayerData("p0", playerName, startingChips));
 
             for (int i = 1; i < playerCount; i++)
@@ -351,15 +440,20 @@ namespace PokerSocial.Core
                 players.Add(new PlayerData($"p{i}", defaultBotNames[(i - 1) % defaultBotNames.Length], startingChips));
             }
 
-            float radius = 380f;
+            string[] seatKeys = { "player_bottom", "player_top_left", "player_top_right", "player_left" };
+
             for (int i = 0; i < players.Count; i++)
             {
-                float angle = Mathf.PI * (0.12f + 0.76f * i / Mathf.Max(1, players.Count - 1));
-                Vector2 pos = new Vector2(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius - 60);
-                var anchor = CreateAnchor(tableFelt, pos);
+                string key = seatKeys[i % seatKeys.Length];
+                RectTransform anchor = seatAnchors[key];
+
                 seatAnchors[players[i].playerId] = anchor;
 
-                var nameText = CreateText(anchor, new Vector2(0, 70), new Vector2(180, 24), 15,
+                var oldLabel = anchor.Find("SeatLabel_" + players[i].playerId);
+                if (oldLabel != null) Destroy(oldLabel.gameObject);
+
+                Vector2 labelOffset = (key == "player_bottom") ? new Vector2(0, 52) : new Vector2(0, -52);
+                var nameText = CreateText(anchor, labelOffset, new Vector2(180, 22), 14,
                     $"{players[i].displayName} ({players[i].chipStack})");
                 nameText.gameObject.name = "SeatLabel_" + players[i].playerId;
             }
@@ -388,32 +482,27 @@ namespace PokerSocial.Core
 
             var deck = new Deck();
 
-            // 1. PRE-FLOP
             yield return StartCoroutine(DealHoleCards(deck));
             foreach (var cv in seatCards[players[0].playerId])
                 yield return StartCoroutine(cv.FlipRoutine());
 
             yield return StartCoroutine(PlayerActionRound("Pre-Flop"));
-            if (CountActive() <= 1) { yield return StartCoroutine(Showdown()); yield break; }
+            if (CountActive() <= 1 || humanFolded) { yield return StartCoroutine(Showdown()); yield break; }
 
-            // 2. FLOP
             ResetRoundBets();
             yield return StartCoroutine(DealCommunityCards(deck, 3));
             yield return StartCoroutine(PlayerActionRound("Flop"));
-            if (CountActive() <= 1) { yield return StartCoroutine(Showdown()); yield break; }
+            if (CountActive() <= 1 || humanFolded) { yield return StartCoroutine(Showdown()); yield break; }
 
-            // 3. TURN
             ResetRoundBets();
             yield return StartCoroutine(DealCommunityCards(deck, 1));
             yield return StartCoroutine(PlayerActionRound("Turn"));
-            if (CountActive() <= 1) { yield return StartCoroutine(Showdown()); yield break; }
+            if (CountActive() <= 1 || humanFolded) { yield return StartCoroutine(Showdown()); yield break; }
 
-            // 4. RIVER
             ResetRoundBets();
             yield return StartCoroutine(DealCommunityCards(deck, 1));
             yield return StartCoroutine(PlayerActionRound("River"));
 
-            // 5. SHOWDOWN
             yield return StartCoroutine(Showdown());
         }
 
@@ -441,7 +530,10 @@ namespace PokerSocial.Core
                 SetActionButtonsInteractable(false);
             }
 
-            yield return StartCoroutine(OpponentDecisions());
+            if (!humanFolded)
+            {
+                yield return StartCoroutine(OpponentDecisions());
+            }
         }
 
         private IEnumerator DealHoleCards(Deck deck)
@@ -454,13 +546,15 @@ namespace PokerSocial.Core
                 foreach (var p in players)
                 {
                     var card = deck.Draw();
-                    var cv = CardView.Create(tableFelt, new Vector2(70, 100));
+                    var cv = CardView.Create(tableFelt, new Vector2(55, 78));
                     cv.Setup(card);
+
+                    cv.SetFaceDown(customCardBack);
                     cv.Rect.anchoredPosition = deckAnchor.anchoredPosition;
 
                     var seat = seatAnchors[p.playerId];
                     int idx = seatCards[p.playerId].Count;
-                    Vector2 offset = new Vector2((idx - 0.5f) * 45, -10);
+                    Vector2 offset = new Vector2((idx - 0.5f) * 36f, 0);
                     Vector2 target = seat.anchoredPosition + offset;
 
                     seatCards[p.playerId].Add(cv);
@@ -471,17 +565,23 @@ namespace PokerSocial.Core
 
         private IEnumerator DealCommunityCards(Deck deck, int count)
         {
+            const float GAP_SPACING = 10f;
+            const float CARD_WIDTH = 55f;
+
             for (int i = 0; i < count; i++)
             {
                 var card = deck.Draw();
                 communityCards.Add(card);
 
-                var cv = CardView.Create(tableFelt, new Vector2(70, 100));
+                var cv = CardView.Create(tableFelt, new Vector2(CARD_WIDTH, 78));
                 cv.Setup(card);
+
+                cv.SetFaceDown(customCardBack);
                 cv.Rect.anchoredPosition = deckAnchor.anchoredPosition;
 
                 int idx = communityCardViews.Count;
-                Vector2 target = communityAnchor.anchoredPosition + new Vector2((idx - 2) * 80, 0);
+                float xPos = (idx - 2) * (CARD_WIDTH + GAP_SPACING);
+                Vector2 target = communityAnchor.anchoredPosition + new Vector2(xPos, 0);
 
                 communityCardViews.Add(cv);
                 yield return StartCoroutine(cv.MoveRoutine(target, 0.15f));
@@ -529,10 +629,12 @@ namespace PokerSocial.Core
                     currentBets[p.playerId] += paid;
                     pot += paid;
                     Log($"{p.displayName} calls {paid}.");
+                    StartCoroutine(ShowSpeechBubble(p.playerId, $"Call {paid}"));
                 }
                 else
                 {
                     Log($"{p.displayName} checks.");
+                    StartCoroutine(ShowSpeechBubble(p.playerId, "Check"));
                 }
 
                 UpdateSeatLabel(p);
@@ -574,6 +676,7 @@ namespace PokerSocial.Core
             {
                 winner.chipStack += pot;
                 Log($"\nWINNER: {winner.displayName} takes pot of {pot} with {bestEval.description}");
+                OnHandComplete(winner.chipStack);
             }
 
             foreach (var p in players) UpdateSeatLabel(p);
@@ -624,19 +727,22 @@ namespace PokerSocial.Core
             waitingForHumanDecision = false;
         }
 
-        private void OnRaiseClicked()
+        private void OnAllInClicked()
         {
             var human = players[0];
-            int toCall = highestBet - currentBets[human.playerId];
-            int totalRaise = toCall + humanRaiseAmount;
-            int paid = Mathf.Min(totalRaise, human.chipStack);
+            if (human.chipStack <= 0) return;
 
-            human.chipStack -= paid;
-            currentBets[human.playerId] += paid;
-            highestBet = currentBets[human.playerId];
-            pot += paid;
+            int allInAmount = human.chipStack;
+            human.chipStack = 0;
+            currentBets[human.playerId] += allInAmount;
+            pot += allInAmount;
 
-            Log($"You raise to {highestBet} (+{humanRaiseAmount}).");
+            if (currentBets[human.playerId] > highestBet)
+            {
+                highestBet = currentBets[human.playerId];
+            }
+
+            Log($"ALL-IN! You pushed your entire stack ({allInAmount} chips) into the pot!");
             UpdateSeatLabel(human);
             UpdatePotText();
             waitingForHumanDecision = false;
@@ -692,11 +798,14 @@ namespace PokerSocial.Core
         {
             foldBtn.interactable = value;
             callCheckBtn.interactable = value;
-            raiseBtn.interactable = value;
-            bluffBtn.interactable = value;
-            strongBtn.interactable = value;
-            allianceBtn.interactable = value;
-            tellBtn.interactable = value;
+            halfPotBtn.interactable = value && players[0].chipStack > 0;
+            potBtn.interactable = value && players[0].chipStack > 0;
+            allInBtn.interactable = value && players[0].chipStack > 0;
+
+            if (bluffBtn != null) bluffBtn.interactable = value;
+            if (strongBtn != null) strongBtn.interactable = value;
+            if (allianceBtn != null) allianceBtn.interactable = value;
+            if (tellBtn != null) tellBtn.interactable = value;
         }
 
         private void UpdateSeatLabel(PlayerData p)
@@ -708,19 +817,98 @@ namespace PokerSocial.Core
 
         private void UpdatePotText() => potText.text = $"Pot: {pot}";
 
-        private void Log(string line)
+        private Queue<string> logHistory = new Queue<string>();
+        private const int MAX_LOG_LINES = 25;
+
+        private void Log(string message)
         {
-            logText.text += line + "\n";
+            Debug.Log(message);
+
+            logHistory.Enqueue(message);
+
+            while (logHistory.Count > MAX_LOG_LINES)
+            {
+                logHistory.Dequeue();
+            }
+
+            if (logText != null)
+            {
+                logText.text = string.Join("\n", logHistory);
+            }
+
             StartCoroutine(ScrollToBottomNextFrame());
-            Debug.Log(line);
         }
 
         private IEnumerator ScrollToBottomNextFrame()
         {
             yield return new WaitForEndOfFrame();
-            if (scrollRect != null)
+            if (logText != null && logText.rectTransform.parent != null)
             {
-                scrollRect.verticalNormalizedPosition = 0f;
+                LayoutRebuilder.ForceRebuildLayoutImmediate(logText.rectTransform.parent as RectTransform);
+            }
+        }
+
+        private void OnHalfPotClicked()
+        {
+            var human = players[0];
+            int toCall = highestBet - currentBets[human.playerId];
+            int currentPotWithCall = pot + toCall;
+
+            int raiseSize = Mathf.Max(50, currentPotWithCall / 2);
+            ExecuteBet(toCall + raiseSize);
+        }
+
+        private void OnPotClicked()
+        {
+            var human = players[0];
+            int toCall = highestBet - currentBets[human.playerId];
+            int currentPotWithCall = pot + toCall;
+
+            int raiseSize = Mathf.Max(100, currentPotWithCall);
+            ExecuteBet(toCall + raiseSize);
+        }
+
+        private void ExecuteBet(int totalBetAmount)
+        {
+            var human = players[0];
+            int neededChips = totalBetAmount - currentBets[human.playerId];
+
+            if (neededChips >= human.chipStack)
+            {
+                OnAllInClicked();
+                return;
+            }
+
+            human.chipStack -= neededChips;
+            currentBets[human.playerId] += neededChips;
+            pot += neededChips;
+            highestBet = currentBets[human.playerId];
+
+            Log($"You raised to {highestBet} chips.");
+            UpdateSeatLabel(human);
+            UpdatePotText();
+            waitingForHumanDecision = false;
+        }
+
+        private IEnumerator ShowSpeechBubble(string playerId, string text, float duration = 3.5f)
+        {
+            if (!seatAnchors.TryGetValue(playerId, out var anchor)) yield break;
+
+            var existingBubble = anchor.Find("SpeechBubble_" + playerId);
+            if (existingBubble != null) Destroy(existingBubble.gameObject);
+
+            Vector2 bubbleOffset = (playerId == players[0].playerId) ? new Vector2(0, 80) : new Vector2(0, -80);
+            var bubblePanel = CreatePanel(anchor, bubbleOffset, new Vector2(120, 32), new Color(0.05f, 0.05f, 0.08f, 0.9f));
+            bubblePanel.gameObject.name = "SpeechBubble_" + playerId;
+
+            var bubbleText = CreateText(bubblePanel, Vector2.zero, new Vector2(110, 24), 12, text);
+            bubbleText.alignment = TextAnchor.MiddleCenter;
+
+            yield return new WaitForSeconds(duration);
+
+            if (bubblePanel != null)
+            {
+                Destroy(bubblePanel.gameObject);
             }
         }
     }

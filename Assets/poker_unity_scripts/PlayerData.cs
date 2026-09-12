@@ -19,7 +19,7 @@ namespace PokerSocial.Data
         public List<string> unlockedAbilities = new(); // CardAbility names, cosmetic/social unlocks only
 
         // Per-opponent history feeds the rivalry graph
-        public Dictionary<string, HeadToHeadRecord> headToHead = new();
+        public Dictionary<string, PokerSocial.Data.HeadToHeadRecord> headToHead;
 
         public PlayerData(string id, string name, int startingChips)
         {

@@ -57,16 +57,28 @@ namespace PokerSocial.Core
 
         public void Setup(Card card) => Card = card;
 
-        public void SetFaceDown()
+        public void SetFaceDown(Sprite customBack = null)
         {
             FaceUp = false;
-            bg.color = BackColor;
-            label.text = "";
+            label.text = ""; // Clear text when face down
+
+            if (customBack != null)
+            {
+                bg.sprite = customBack;
+                bg.color = Color.white; // Reset color tint to show original texture
+            }
+            else
+            {
+                bg.sprite = null;
+                bg.color = BackColor; // Fallback default navy color
+            }
         }
 
         public void SetFaceUp()
         {
             FaceUp = true;
+            bg.sprite = null; // --- CLEAR SPRITE SO FACE TEXT IS VISIBLE ---
+
             bool red = Card.suit == Suit.Hearts || Card.suit == Suit.Diamonds;
             bg.color = red ? FaceColorRed : FaceColorBlack;
             label.color = red ? new Color(0.75f, 0f, 0f) : Color.black;
