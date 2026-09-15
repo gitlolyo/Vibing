@@ -1,5 +1,5 @@
 using System;
-using System.Collections;
+using System.Collections; 
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -144,7 +144,7 @@ namespace PokerSocial.Core
             seatAnchors["player_left"] = CreateAnchor(tableFelt, new Vector2(-310, 0));
 
             // Header UI: Centered Pot & Isolated Reputation Bar
-            potText = CreateText(tableFelt, new Vector2(0, 205), new Vector2(300, 32), 24, "Pot: 0");
+            potText = CreateText(tableFelt, PokerTableLayoutConfig.PotTextPos, PokerTableLayoutConfig.PotTextSize, 24, "Pot: 0");
 
             // Dedicated Info Bar positioned cleanly above community space
             var infoBar = CreatePanel(tableFelt, new Vector2(0, 175), new Vector2(480, 24), new Color(0, 0, 0, 0.4f));

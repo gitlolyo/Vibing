@@ -17,7 +17,7 @@ namespace PokerSocial.Core
         public static readonly Vector2 ActionPanelPos = new Vector2(440f + (260f / 2f), 0);
         public static readonly Vector2 LogPanelPos = new Vector2(-440f - (320f / 2f), 0);
 
-        public static readonly Vector2 PotTextPos = new Vector2(0, 205);
+        public static readonly Vector2 PotTextPos = new Vector2(0, 220);
         public static readonly Vector2 PotTextSize = new Vector2(300, 32);
 
         public static readonly Vector2 InfoBarPos = new Vector2(0, 175);
